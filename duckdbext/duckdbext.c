@@ -82,25 +82,52 @@ PHP_METHOD(Database, __construct) {
 
 static zend_object *php_connection_object_new(zend_class_entry *class_type)
 {
-    // TODO allocate memory for object
-    // TODO init object + properties
-    // TODO install handlers
+    php_duckdb_connection_object *intern;
+
+    /* Allocate memory for it */
+    intern = zend_object_alloc(sizeof(php_duckdb_connection_object), class_type);
+
+    zend_object_std_init(&intern->zo, class_type);
+    object_properties_init(&intern->zo, class_type);
+
+    intern->zo.handlers = &duckdb_connection_object_handlers;
+
+    return &intern->zo;
 }
 
 static void php_connection_object_free(zend_object *object)
 {
-    // extract object
-    // call duckdb_disconnect on connection
-    // destroy zend object
+    php_duckdb_connection_object *intern = php_duckdb_connection_from_obj(object);
+
+    if (!intern) {
+        return;
+    }
+
+    if (intern->connection) {
+        duckdb_disconnect(&intern->connection);
+    }
+
+    zend_object_std_dtor(&intern->zo);
 }
 
 PHP_METHOD(Connection, __construct) {
-    // TODO uncomment class definition in PHP stub
-    // TODO get wrap structure from this
-    // TODO validate input parameter
-    // TODO extract database object from parameter
-    // TODO connect to database with duckdb_connect
-    // TODO throw an exception if we cannot connect
+    php_duckdb_db_object *db_obj;
+    zval *db_zval;
+    zval *object = ZEND_THIS;
+    php_duckdb_connection_object *connection_obj;
+
+    connection_obj = Z_DUCK_CONNECTION_P(object);
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_OBJECT_OF_CLASS(db_zval, duckdb_database_ce)
+    ZEND_PARSE_PARAMETERS_END();
+
+    db_obj = Z_DUCKDATABASE_P(db_zval);
+
+    if (duckdb_connect(db_obj->db, &(connection_obj->connection)) == DuckDBError) {
+        zend_throw_exception(zend_ce_exception, "Error during initialization", 0);
+        RETURN_THROWS();
+    }
 }
 
 static zend_object *php_result_object_new(zend_class_entry *class_type)
@@ -137,12 +164,32 @@ static void php_result_object_free(zend_object *object)
 
 PHP_METHOD(Connection, query)
 {
-    // TODO allocate memory for the result object
-    // TODO extract object from this
-    // TODO validate parameters
-    // TODO initialize return result object
-    // TODO query the database
-    // TODO throw an exception if everything go astray
+    char *query      = NULL;
+    size_t query_len = 0;
+
+    zval *object = ZEND_THIS;
+    php_duckdb_connection_object *connection_obj;
+    php_duckdb_result_object *result_obj;
+
+    duckdb_result *inner_result;
+
+    connection_obj = Z_DUCK_CONNECTION_P(object);
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(query, query_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    inner_result = emalloc(sizeof(duckdb_result));
+
+    object_init_ex(return_value, duckdb_result_ce);
+    result_obj = Z_DUCK_RESULT_P(return_value);
+    result_obj->result = inner_result;
+
+    if (duckdb_query(connection_obj->connection, query, inner_result) == DuckDBError) {
+        zend_throw_exception_ex(duckdb_statementexception_ce, 0, "%s", duckdb_result_error(inner_result));
+
+        RETURN_THROWS();
+    }
 }
 
 
@@ -166,9 +213,26 @@ void duckdb_value_to_zval(duckdb_result *result, idx_t row, idx_t column, zval *
 
 PHP_METHOD(Result, toArray)
 {
-    // TODO extract object
-    // TODO register array as a return
-    // TODO traverse result set and construct multidimensional array
+    zval *object = ZEND_THIS;
+    php_duckdb_result_object *result_obj;
+    result_obj = Z_DUCK_RESULT_P(object);
+    array_init(return_value);
+
+    idx_t row_count = duckdb_row_count(result_obj->result);
+    idx_t column_count = duckdb_column_count(result_obj->result);
+
+    for (idx_t row_idx = 0; row_idx < row_count; row_idx++) {
+        zval row;
+        array_init(&row);
+
+        for (idx_t col_idx = 0; col_idx < column_count; col_idx++) {
+            zval data;
+            duckdb_value_to_zval(result_obj->result, row_idx, col_idx, &data);
+            add_index_zval(&row, col_idx, &data);
+        }
+
+        add_index_zval(return_value, row_idx, &row);
+    }
 }
 
 /* {{{ PHP_RINIT_FUNCTION */
@@ -207,7 +271,14 @@ PHP_MINIT_FUNCTION(duckdbext)
     duckdb_database_ce = zend_register_internal_class(&duckdb_database_ce_local);
     duckdb_database_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
 
-    // TODO Add class definition and handlers for DuckDB/Connection
+    zend_class_entry duckdb_connect_ce_local;
+    INIT_NS_CLASS_ENTRY(duckdb_connect_ce_local, "DuckDB","Connection", class_Connection_methods);
+    duckdb_connect_ce_local.create_object = php_connection_object_new;
+    duckdb_connection_object_handlers.offset = XtOffsetOf(php_duckdb_connection_object, zo);
+    duckdb_connection_object_handlers.clone_obj = NULL;
+    duckdb_connection_object_handlers.free_obj = php_connection_object_free;
+    duckdb_connect_ce = zend_register_internal_class(&duckdb_connect_ce_local);
+    duckdb_connect_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
 
     zend_class_entry duckdb_statementexception_ce_local;
     INIT_NS_CLASS_ENTRY(duckdb_statementexception_ce_local, "DuckDB","StatementException", NULL);
