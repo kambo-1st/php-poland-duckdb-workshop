@@ -19,6 +19,3 @@ or (for Compose V2)
 ```bash
 docker compose run cli
 ```
-
-## Presentation
-http://bohuslav.simek.si/ipc-berlin-duckdb-ffi-extension-workshop/
